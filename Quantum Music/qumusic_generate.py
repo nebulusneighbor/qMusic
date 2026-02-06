@@ -1,12 +1,10 @@
 import numpy as np
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
-from midiutil import MIDIFile
 from pythonosc import udp_client
 import time
 
 # --- 1. CONFIGURATION ---
-FILENAME = "quantum_melody.mid"
 TEMPO = 120
 CHORDS = [
     [60, 64, 67],  # C Major (I)
@@ -21,38 +19,32 @@ ABLETON_IP = "127.0.0.1"
 ABLETON_PORT = 11000
 TRACK_INDEX = 0      # Track to place the clip (0-indexed)
 CLIP_INDEX = 0       # Clip slot to place the clip (0-indexed)
+LENGTH = 16
 
 # --- 2. ABLETON OSC CLIENT ---
 class AbletonOSCClient:
     def __init__(self, ip=ABLETON_IP, port=ABLETON_PORT):
         self.client = udp_client.SimpleUDPClient(ip, port)
 
-    def create_clip(self, track_index, clip_index, length_beats):
-        """Creates a MIDI clip of specified length."""
-        # AbletonOSC doesn't have a direct 'create_clip' but we can 
-        # try to ensure the track exists or just clear/add notes to a slot.
-        # Usually, adding notes will implicitly handle clip if the slot is valid.
-        pass
+    def create_clip(self, track_index, clip_index):
+        """Creates a MIDI clip in the specified slot."""
+        print(f"Creating clip at Track {track_index}, Slot {clip_index}...")
+        self.client.send_message("/live/clip_slot/create_clip", [track_index, clip_index, LENGTH])
 
     def add_notes(self, track_index, clip_index, notes):
         """
-        Sends notes to an Ableton clip.
-        'notes' should be a list of (pitch, start_time, duration, velocity, mute)
+        Sends notes to an Ableton clip serially.
+        'notes' should be a list of (pitch, start_time, duration, velocity)
         """
-        # Clear existing notes first (optional but recommended for fresh start)
-        self.client.send_message(f"/live/clip/delete/notes", [track_index, clip_index])
-        
-        # AbletonOSC add/notes takes: track, clip, pitch, start, duration, velocity, mute
-        # We can send them one by one or in batches if the API supports it.
-        # Most AbletonOSC implementations expect: pitch, start, duration, velocity, mute per note
+        print(f"Adding {len(notes)} notes serially...")
         for note in notes:
             pitch, start, duration, velocity = note
-            self.client.send_message(f"/live/clip/add/notes", [track_index, clip_index, pitch, start, duration, velocity, 0])
+            self.client.send_message("/live/clip/add/notes", [track_index, clip_index, pitch, start, duration, velocity, False])
 
     def fire_clip(self, track_index, clip_index):
         """Launches the clip."""
         print(f"Firing clip at Track {track_index}, Slot {clip_index}...")
-        self.client.send_message("/live/play/clipslot", [track_index, clip_index])
+        self.client.send_message("/live/clip_slot/fire", [track_index, clip_index])
 
 # --- 3. QUANTUM ENGINE ---
 def get_quantum_indices(num_notes):
@@ -71,22 +63,17 @@ def get_quantum_indices(num_notes):
     indices = [int(bitstring, 2) for bitstring in memory]
     return indices
 
-# --- 4. MUSIC GENERATION ---
-def generate_melody():
-    # Setup MIDI File: 1 track, time 0
-    midi = MIDIFile(1)
-    midi.addTempo(0, 0, TEMPO)
-    
+# --- 4. MUSIC GENERATION & ABLETON SYNC ---
+def generate_and_sync():
     # We need total random numbers = (chords) * (notes per chord)
     total_notes_needed = len(CHORDS) * NOTES_PER_CHORD
     quantum_randomness = get_quantum_indices(total_notes_needed)
     
-    current_time = 0
+    notes_for_osc = []
+    current_time = 0.0
     q_counter = 0
     
-    notes_for_osc = []
-    
-    print(f"Generating melody at {TEMPO} BPM...")
+    print(f"Generating quantum melody (BPM: {TEMPO})...")
     
     for chord in CHORDS:
         extended_chord = chord + [chord[0] + 12]
@@ -95,35 +82,35 @@ def generate_melody():
             note_index = quantum_randomness[q_counter]
             note_pitch = extended_chord[note_index]
             
-            # Add note to MIDI (track, channel, pitch, time, duration, volume)
-            midi.addNote(0, 0, note_pitch, current_time, 1, 100)
-            
             # Store for OSC: (pitch, start_time_beats, duration_beats, velocity)
-            notes_for_osc.append((note_pitch, float(current_time), 1.0, 100))
+            notes_for_osc.append((note_pitch, current_time, 1.0, 100))
             
-            current_time += 1
+            current_time += 1.0
             q_counter += 1
             
-    # Save to file
-    with open(FILENAME, "wb") as output_file:
-        midi.writeFile(output_file)
-    print(f"Success! Saved to {FILENAME}")
-
-    # --- 5. ABLETON INTEGRATION ---
+    # --- ABLETON INTEGRATION ---
     try:
         print("Connecting to Ableton...")
         osc = AbletonOSCClient()
         
-        print(f"Sending {len(notes_for_osc)} notes to Ableton Track {TRACK_INDEX}, Slot {CLIP_INDEX}...")
+        # Create clip first
+        osc.create_clip(TRACK_INDEX, CLIP_INDEX)
+        
+        # Small delay to ensure clip creation is processed
+        time.sleep(0.2)
+        
+        # Send notes serially
         osc.add_notes(TRACK_INDEX, CLIP_INDEX, notes_for_osc)
         
-        # Small delay to ensure notes are registered before firing
+        # Small delay before firing
         time.sleep(0.5)
         osc.fire_clip(TRACK_INDEX, CLIP_INDEX)
+        
+        print("Success! Melody sent and fired in Ableton.")
         
     except Exception as e:
         print(f"Could not connect to Ableton or send OSC: {e}")
         print("Ensure Ableton Live is running and AbletonOSC remote script is active.")
 
 if __name__ == "__main__":
-    generate_melody()
+    generate_and_sync()
